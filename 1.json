@@ -1,0 +1,601 @@
+{
+  "name": "VidPro Client Acquisition Automation - Race Condition Fixed",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 6 * * *"
+            }
+          ]
+        },
+        "timezone": "Asia/Kolkata"
+      },
+      "id": "cron-trigger",
+      "name": "Daily Morning Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://feeds.feedburner.com/techcrunch/startups",
+        "options": {}
+      },
+      "id": "rss-techcrunch",
+      "name": "TechCrunch RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [440, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://venturebeat.com/feed/",
+        "options": {}
+      },
+      "id": "rss-venturebeat",
+      "name": "VentureBeat RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [440, 320]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": "processed_keys",
+        "options": {}
+      },
+      "id": "read-processed-keys",
+      "name": "Read Processed Keys",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [440, 440],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-credentials",
+          "name": "Google Sheets Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {}
+      },
+      "id": "batch-newsapi",
+      "name": "Batch NewsAPI Requests",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [640, 320]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://newsapi.org/v2/everything",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "qs": {
+          "q": "\"we are hiring\" OR \"we're hiring\" OR \"join our team\" OR \"now hiring\" OR \"series a\" OR \"series b\" OR \"raised funding\" OR \"expansion\" OR \"new office\"",
+          "language": "en",
+          "sortBy": "publishedAt",
+          "pageSize": "20",
+          "from": "={{ new Date(Date.now() - 24*60*60*1000).toISOString().substring(0,10) }}"
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "retry": {
+            "enabled": true,
+            "maxAttempts": 3,
+            "waitBetween": 1000
+          }
+        }
+      },
+      "id": "newsapi-request",
+      "name": "NewsAPI Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [840, 320],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "newsapi-credentials",
+          "name": "NewsAPI Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse NewsAPI response and extract articles\nconst items = [];\n\nfor (const inputItem of $input.all()) {\n  const data = inputItem.json;\n  \n  if (data && data.articles && Array.isArray(data.articles)) {\n    for (const article of data.articles) {\n      items.push({\n        json: {\n          title: article.title || '',\n          description: article.description || '',\n          url: article.url || '',\n          publishedAt: article.publishedAt || '',\n          source: article.source?.name || '',\n          content: article.content || ''\n        }\n      });\n    }\n  }\n}\n\nreturn items;"
+      },
+      "id": "parse-newsapi",
+      "name": "Parse NewsAPI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Safe keyword detection and company extraction\nconst items = [];\n\nfor (const inputItem of $input.all()) {\n  const item = inputItem.json;\n  \n  // Safe text combination with null checks\n  const title = item.title || '';\n  const description = item.description || '';\n  const content = item.content || '';\n  const text = `${title} ${description} ${content}`.toLowerCase();\n  \n  // Enhanced keyword patterns\n  const hiringKeywords = /\\b(hiring|we'?re hiring|open role|join our team|careers|now hiring|recruiting|job opening|positions available|we'?re looking for|talent acquisition)\\b/i;\n  const fundingKeywords = /\\b(raised|series [ab]|seed|funding|acquired|investment|venture capital|vc|closes|million|billion|round|financing)\\b/i;\n  const expansionKeywords = /\\b(expanding|expansion|opening office|launching|new office|grow team|scaling|opened|establishes)\\b/i;\n  \n  let reason = null;\n  let score = 0;\n  \n  if (hiringKeywords.test(text)) {\n    reason = 'hiring';\n    score += 5;\n  } else if (fundingKeywords.test(text)) {\n    reason = 'funding';\n    score += 4;\n  } else if (expansionKeywords.test(text)) {\n    reason = 'expansion';\n    score += 3;\n  }\n  \n  if (reason) {\n    // Safe company name extraction with fallbacks\n    let companyName = item.source || 'Unknown';\n    \n    // Only try regex if title exists and is a string\n    if (title && typeof title === 'string') {\n      const patterns = [\n        /^([A-Z][a-zA-Z\\s&\\.\\-]+?)\\s+(raises|hires|announces|launches|opens|acquires|expands)/i,\n        /([A-Z][a-zA-Z\\s&\\.\\-]+?)\\s+(raises|closes|secures)\\s+\\$?\\d+/i,\n        /([A-Z][a-zA-Z\\s&\\.\\-]+?)\\s+is\\s+(hiring|expanding|launching)/i,\n        /([A-Z][a-zA-Z\\s&\\.\\-]+?)\\s+(completes|announces)\\s+(series|funding)/i\n      ];\n      \n      for (const pattern of patterns) {\n        try {\n          const titleMatch = title.match(pattern);\n          if (titleMatch && titleMatch[1] && titleMatch[1].trim().length > 1) {\n            companyName = titleMatch[1].trim();\n            break;\n          }\n        } catch (e) {\n          // Continue with next pattern if regex fails\n          continue;\n        }\n      }\n    }\n    \n    // Clean company name safely\n    if (companyName && typeof companyName === 'string') {\n      companyName = companyName.replace(/^(the|a)\\s+/i, '').trim();\n      // Ensure we still have a name after cleaning\n      if (!companyName || companyName.length < 2) {\n        companyName = item.source || 'Unknown';\n      }\n    } else {\n      companyName = 'Unknown';\n    }\n    \n    // Create unique key for deduplication\n    const today = new Date().toISOString().substring(0,10);\n    const safeCompanyName = companyName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();\n    const uniqueKey = `${safeCompanyName}_${reason}_${today}`;\n    \n    items.push({\n      json: {\n        date_found: today,\n        company_name: companyName,\n        reason: reason,\n        evidence_link: item.url || '',\n        score: score,\n        title: title,\n        description: description,\n        unique_key: uniqueKey,\n        source_type: 'news',\n        item_type: 'candidate_lead'\n      }\n    });\n  }\n}\n\nreturn items;"
+      },
+      "id": "keyword-detection",
+      "name": "Keyword Detection & Scoring",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convert processed keys to standard format\nconst processedKeyItems = [];\n\nfor (const inputItem of $input.all()) {\n  const item = inputItem.json;\n  \n  // Each row from Google Sheets becomes a processed key item\n  if (item && item.unique_key) {\n    processedKeyItems.push({\n      json: {\n        unique_key: item.unique_key,\n        processed_date: item.processed_date || '',\n        item_type: 'processed_key'\n      }\n    });\n  }\n}\n\nreturn processedKeyItems;"
+      },
+      "id": "format-processed-keys",
+      "name": "Format Processed Keys",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 440]
+    },
+    {
+      "parameters": {
+        "mode": "waitForAll",
+        "options": {}
+      },
+      "id": "merge-all-inputs",
+      "name": "Merge All Inputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1440, 350]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two-pass dedupe: first collect all processed keys, then filter candidates\nconst SCORE_THRESHOLD = 3;\nconst processedKeys = new Set();\nconst candidateLeads = [];\nconst newItems = [];\n\n// PASS 1: Collect all processed keys\nfor (const inputItem of $input.all()) {\n  const item = inputItem.json;\n  \n  if (item && item.item_type === 'processed_key' && item.unique_key) {\n    processedKeys.add(item.unique_key.toLowerCase());\n  } else if (item && item.item_type === 'candidate_lead') {\n    candidateLeads.push(item);\n  }\n}\n\n// PASS 2: Filter candidate leads against processed keys\nfor (const candidate of candidateLeads) {\n  // Skip if already processed\n  if (candidate.unique_key && processedKeys.has(candidate.unique_key.toLowerCase())) {\n    continue;\n  }\n  \n  // Only keep items with score >= threshold\n  if (candidate.score && candidate.score >= SCORE_THRESHOLD) {\n    newItems.push({\n      json: {\n        ...candidate,\n        needs_enrichment: candidate.score >= 5 // Flag for enrichment\n      }\n    });\n  }\n}\n\nreturn newItems;"
+      },
+      "id": "dedupe-filter",
+      "name": "Deduplicate & Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 350]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-enrichment",
+              "leftValue": "={{ $json.needs_enrichment }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-enrichment",
+      "name": "Check if Enrichment Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1840, 350]
+    },
+    {
+      "parameters": {
+        "batchSize": 3,
+        "options": {}
+      },
+      "id": "batch-enrichment",
+      "name": "Batch Enrichment Requests",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [2040, 250]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://company.clearbit.com/v1/domains/find",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "qs": {
+          "name": "={{ $json.company_name }}"
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "retry": {
+            "enabled": true,
+            "maxAttempts": 2,
+            "waitBetween": 3000
+          }
+        }
+      },
+      "id": "clearbit-enrichment",
+      "name": "Clearbit Enrichment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2240, 250],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "clearbit-credentials",
+          "name": "Clearbit Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Safe merge enrichment data - handles both enriched and non-enriched items\nconst items = [];\n\nfor (const inputItem of $input.all()) {\n  let item = { ...inputItem.json };\n  \n  // Default empty enrichment values\n  let enrichedData = {\n    domain: '',\n    employee_count: '',\n    industry: '',\n    location: ''\n  };\n  \n  try {\n    // Check if this item went through enrichment and got valid data\n    if (item.domain && typeof item.domain === 'string' && item.domain.length > 0) {\n      // Clearbit returned valid domain data\n      enrichedData.domain = item.domain;\n      enrichedData.employee_count = (item.metrics && item.metrics.employees) ? String(item.metrics.employees) : (item.metrics && item.metrics.employeesRange) ? item.metrics.employeesRange : '';\n      enrichedData.industry = (item.category && item.category.industry) ? item.category.industry : (item.category && item.category.sector) ? item.category.sector : '';\n      \n      // Build location string safely\n      if (item.geo) {\n        const city = item.geo.city || '';\n        const country = item.geo.country || '';\n        if (city && country) {\n          enrichedData.location = `${city}, ${country}`;\n        } else if (country) {\n          enrichedData.location = country;\n        }\n      }\n    }\n    // If no domain or invalid enrichment, keep empty defaults\n  } catch (error) {\n    // Enrichment parsing error - keep empty defaults\n    console.log('Enrichment parsing error:', error.message);\n  }\n  \n  // Build final clean output\n  items.push({\n    json: {\n      date_found: item.date_found || new Date().toISOString().substring(0,10),\n      company_name: item.company_name || 'Unknown',\n      domain: enrichedData.domain,\n      reason: item.reason || '',\n      evidence_link: item.evidence_link || '',\n      location: enrichedData.location,\n      score: item.score || 0,\n      employee_count: enrichedData.employee_count,\n      industry: enrichedData.industry,\n      title: item.title || '',\n      unique_key: item.unique_key || ''\n    }\n  });\n}\n\nreturn items;"
+      },
+      "id": "merge-enrichment",
+      "name": "Merge Enrichment Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 350]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": "client_leads",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date_found": "={{ $json.date_found }}",
+            "company_name": "={{ $json.company_name }}",
+            "domain": "={{ $json.domain }}",
+            "reason": "={{ $json.reason }}",
+            "evidence_link": "={{ $json.evidence_link }}",
+            "location": "={{ $json.location }}",
+            "score": "={{ $json.score }}",
+            "employee_count": "={{ $json.employee_count }}",
+            "industry": "={{ $json.industry }}",
+            "title": "={{ $json.title }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "append-leads",
+      "name": "Append to Leads Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2640, 350],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-credentials",
+          "name": "Google Sheets Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": "processed_keys",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "unique_key": "={{ $json.unique_key }}",
+            "processed_date": "={{ new Date().toISOString().substring(0,10) }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "save-processed-key",
+      "name": "Save Processed Key",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2840, 350],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-credentials",
+          "name": "Google Sheets Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create comprehensive summary with safe Slack formatting\nconst leads = $input.all();\nconst totalLeads = leads.length;\nconst highScoreLeads = leads.filter(item => item.json && item.json.score >= 5).length;\nconst today = new Date().toISOString().substring(0,10);\n\n// Build top leads list safely\nconst topLeads = leads\n  .filter(item => item.json && item.json.score) // Only items with scores\n  .sort((a, b) => (b.json.score || 0) - (a.json.score || 0))\n  .slice(0, 5)\n  .map(item => {\n    const company = item.json.company_name || 'Unknown';\n    const reason = item.json.reason || 'unknown';\n    const score = item.json.score || 0;\n    const link = item.json.evidence_link || '#';\n    const domain = item.json.domain ? ` (${item.json.domain})` : '';\n    return `• *${company}${domain}* - ${reason} signal (score: ${score})\\n  <${link}|View Evidence>`;\n  });\n\n// Build Slack message\nlet message = `🎯 *Daily Client Acquisition Report - ${today}*\\n\\n`;\nmessage += `📊 *Summary:*\\n`;\nmessage += `• Total new leads: ${totalLeads}\\n`;\nmessage += `• High-priority leads (score ≥5): ${highScoreLeads}\\n\\n`;\n\nif (topLeads.length > 0) {\n  message += `🏆 *Top ${Math.min(5, topLeads.length)} Leads:*\\n`;\n  message += topLeads.join('\\n') + '\\n\\n';\n} else {\n  message += `📝 *No qualifying leads found today.*\\n\\n`;\n}\n\nmessage += `📋 <YOUR_GOOGLE_SHEET_URL|View Full Results in Google Sheet>`;\n\nconst summary = {\n  total_new_leads: totalLeads,\n  high_score_leads: highScoreLeads,\n  date: today,\n  message: message,\n  top_leads_count: topLeads.length\n};\n\nreturn [{ json: summary }];"
+      },
+      "id": "create-summary",
+      "name": "Create Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3040, 350]
+    },
+    {
+      "parameters": {
+        "channel": "#business-development",
+        "text": "={{ $json.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack-notification",
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [3240, 350],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-credentials",
+          "name": "Slack Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": "workflow_errors",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "error_date": "={{ new Date().toISOString() }}",
+            "node_name": "={{ $node.name }}",
+            "error_message": "Error occurred during workflow execution",
+            "context": "Manual error log entry"
+          }
+        },
+        "options": {},
+        "continueOnFail": true
+      },
+      "id": "log-errors",
+      "name": "Log Errors",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2440, 500],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-credentials",
+          "name": "Google Sheets Credentials"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Daily Morning Trigger": {
+      "main": [
+        [
+          {
+            "node": "TechCrunch RSS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "VentureBeat RSS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Processed Keys",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Batch NewsAPI Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TechCrunch RSS": {
+      "main": [
+        [
+          {
+            "node": "Keyword Detection & Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VentureBeat RSS": {
+      "main": [
+        [
+          {
+            "node": "Keyword Detection & Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Processed Keys": {
+      "main": [
+        [
+          {
+            "node": "Format Processed Keys",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch NewsAPI Requests": {
+      "main": [
+        [
+          {
+            "node": "NewsAPI Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NewsAPI Request": {
+      "main": [
+        [
+          {
+            "node": "Parse NewsAPI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse NewsAPI Response": {
+      "main": [
+        [
+          {
+            "node": "Keyword Detection & Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keyword Detection & Scoring": {
+      "main": [
+        [
+          {
+            "node": "Merge All Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Processed Keys": {
+      "main": [
+        [
+          {
+            "node": "Merge All Inputs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All Inputs": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate & Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate & Filter": {
+      "main": [
+        [
+          {
+            "node": "Check if Enrichment Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Enrichment Needed": {
+      "main": [
+        [
+          {
+            "node": "Batch Enrichment Requests",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Enrichment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch Enrichment Requests": {
+      "main": [
+        [
+          {
+            "node": "Clearbit Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clearbit Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Merge Enrichment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Enrichment Data": {
+      "main": [
+        [
+          {
+            "node": "Append to Leads Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Leads Sheet": {
+      "main": [
+        [
+          {
+            "node": "Save Processed Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Processed Key": {
+      "main": [
+        [
+          {
+            "node": "Create Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Summary": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "n8n-instance"
+  },
+  "id": "vidpro-client-acquisition-race-fixed",
+  "tags": []
+}
