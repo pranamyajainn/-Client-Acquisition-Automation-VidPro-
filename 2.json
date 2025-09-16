@@ -1,0 +1,427 @@
+{
+  "name": "Smart Lead Radar - Simple & Effective",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        },
+        "timezone": "Asia/Kolkata"
+      },
+      "id": "daily-trigger",
+      "name": "Daily 8AM Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "qs": {
+          "engine": "google_jobs",
+          "q": "hiring OR \"we're hiring\" OR \"now hiring\" site:linkedin.com",
+          "location": "India",
+          "num": "50"
+        }
+      },
+      "id": "linkedin-jobs-scrape",
+      "name": "LinkedIn Jobs Scrape",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 200],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "serpapi-credentials",
+          "name": "SerpAPI Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "qs": {
+          "engine": "google",
+          "q": "\"raised funding\" OR \"series A\" OR \"series B\" OR \"expansion\" -site:linkedin.com",
+          "num": "30",
+          "tbs": "qdr:d"
+        }
+      },
+      "id": "funding-news-scrape",
+      "name": "Funding & Expansion News",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 350],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "serpapi-credentials",
+          "name": "SerpAPI Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and score leads from all sources\nconst leads = [];\nconst today = new Date().toISOString().split('T')[0];\n\nfor (const input of $input.all()) {\n  const data = input.json;\n  \n  // Handle LinkedIn Jobs\n  if (data.jobs_results) {\n    for (const job of data.jobs_results || []) {\n      const company = job.company_name || 'Unknown';\n      const title = job.title || '';\n      const location = job.location || '';\n      \n      // Score based on job characteristics\n      let score = 3; // Base score for job posting\n      if (title.toLowerCase().includes('senior') || title.toLowerCase().includes('lead')) score += 2;\n      if (title.toLowerCase().includes('manager') || title.toLowerCase().includes('director')) score += 3;\n      if (company.toLowerCase().includes('tech') || company.toLowerCase().includes('software')) score += 1;\n      \n      leads.push({\n        json: {\n          date_found: today,\n          company_name: company,\n          signal_type: 'hiring',\n          source: 'LinkedIn',\n          evidence: title,\n          link: job.share_link || '',\n          location: location,\n          score: score,\n          unique_id: `${company.replace(/[^a-zA-Z0-9]/g, '_')}_hiring_${today}`\n        }\n      });\n    }\n  }\n  \n  // Handle Funding/Expansion News\n  if (data.organic_results) {\n    for (const result of data.organic_results || []) {\n      const title = result.title || '';\n      const snippet = result.snippet || '';\n      const text = `${title} ${snippet}`.toLowerCase();\n      \n      // Extract company name from title\n      let company = 'Unknown';\n      const companyMatch = title.match(/^([A-Z][a-zA-Z\\s&\\.]+?)\\s+(raises|raised|secures|closes|expands|announces)/i);\n      if (companyMatch) company = companyMatch[1].trim();\n      \n      // Score based on funding/expansion signals\n      let score = 2;\n      let signalType = 'news';\n      \n      if (text.includes('series a') || text.includes('series b')) {\n        score = 6;\n        signalType = 'funding';\n      } else if (text.includes('raised') || text.includes('funding')) {\n        score = 5;\n        signalType = 'funding';\n      } else if (text.includes('expansion') || text.includes('opening office')) {\n        score = 4;\n        signalType = 'expansion';\n      }\n      \n      if (score >= 4) { // Only add high-value signals\n        leads.push({\n          json: {\n            date_found: today,\n            company_name: company,\n            signal_type: signalType,\n            source: 'Google News',\n            evidence: title,\n            link: result.link || '',\n            location: '',\n            score: score,\n            unique_id: `${company.replace(/[^a-zA-Z0-9]/g, '_')}_${signalType}_${today}`\n          }\n        });\n      }\n    }\n  }\n}\n\nreturn leads;"
+      },
+      "id": "extract-score-leads",
+      "name": "Extract & Score Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": "processed_leads",
+        "options": {}
+      },
+      "id": "read-existing-leads",
+      "name": "Read Existing Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [400, 450],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-credentials",
+          "name": "Google Sheets Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Simple deduplication and filtering\nconst existingIds = new Set();\nconst newLeads = [];\n\n// Collect existing IDs\nfor (const input of $input.all()) {\n  if (input.json.unique_id) {\n    existingIds.add(input.json.unique_id);\n  } else if (Array.isArray(input.json)) {\n    // Handle sheet data\n    input.json.forEach(row => {\n      if (row.unique_id) existingIds.add(row.unique_id);\n    });\n  }\n}\n\n// Filter new leads\nfor (const input of $input.all()) {\n  if (input.json.signal_type && !existingIds.has(input.json.unique_id)) {\n    // Apply basic filters\n    const company = input.json.company_name || '';\n    const score = input.json.score || 0;\n    \n    // Skip if company name is too generic or score too low\n    if (company.length > 2 && \n        !company.toLowerCase().includes('unknown') && \n        score >= 3) {\n      newLeads.push(input);\n    }\n  }\n}\n\nreturn newLeads;"
+      },
+      "id": "dedupe-filter",
+      "name": "Dedupe & Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 350]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "high-score-condition",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": 5,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-high-priority",
+      "name": "High Priority Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1000, 350]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://company.clearbit.com/v1/domains/find",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "qs": {
+          "name": "={{ $json.company_name }}"
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "enrich-company",
+      "name": "Enrich High Priority",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 250],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "clearbit-credentials",
+          "name": "Clearbit Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge enrichment data or pass through\nconst finalLeads = [];\n\nfor (const input of $input.all()) {\n  let lead = { ...input.json };\n  \n  // Add enrichment if available\n  if (lead.domain) {\n    lead.website = lead.domain;\n    lead.industry = lead.category?.industry || '';\n    lead.employee_count = lead.metrics?.employees || '';\n    lead.description = lead.description || '';\n  } else {\n    lead.website = '';\n    lead.industry = '';\n    lead.employee_count = '';\n    lead.description = '';\n  }\n  \n  // Clean final output\n  finalLeads.push({\n    json: {\n      date_found: lead.date_found,\n      company_name: lead.company_name,\n      website: lead.website,\n      signal_type: lead.signal_type,\n      source: lead.source,\n      evidence: lead.evidence,\n      link: lead.link,\n      location: lead.location,\n      industry: lead.industry,\n      employee_count: lead.employee_count,\n      score: lead.score,\n      unique_id: lead.unique_id\n    }\n  });\n}\n\nreturn finalLeads;"
+      },
+      "id": "finalize-leads",
+      "name": "Finalize Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 350]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": "daily_leads",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date_found": "={{ $json.date_found }}",
+            "company_name": "={{ $json.company_name }}",
+            "website": "={{ $json.website }}",
+            "signal_type": "={{ $json.signal_type }}",
+            "source": "={{ $json.source }}",
+            "evidence": "={{ $json.evidence }}",
+            "link": "={{ $json.link }}",
+            "location": "={{ $json.location }}",
+            "industry": "={{ $json.industry }}",
+            "employee_count": "={{ $json.employee_count }}",
+            "score": "={{ $json.score }}"
+          }
+        }
+      },
+      "id": "save-leads",
+      "name": "Save to Daily Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1600, 350],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-credentials",
+          "name": "Google Sheets Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": "processed_leads",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "unique_id": "={{ $json.unique_id }}",
+            "processed_date": "={{ $json.date_found }}"
+          }
+        }
+      },
+      "id": "mark-processed",
+      "name": "Mark as Processed",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1800, 350],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-credentials",
+          "name": "Google Sheets Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create simple daily summary\nconst leads = $input.all();\nconst total = leads.length;\nconst highPriority = leads.filter(l => l.json.score >= 5).length;\nconst funding = leads.filter(l => l.json.signal_type === 'funding').length;\nconst hiring = leads.filter(l => l.json.signal_type === 'hiring').length;\n\nconst topLeads = leads\n  .sort((a, b) => b.json.score - a.json.score)\n  .slice(0, 5)\n  .map(l => `• *${l.json.company_name}* (${l.json.signal_type}, score: ${l.json.score})`);\n\nconst message = `🎯 *Daily Lead Radar Report*\n\n📊 *Today's Haul:*\n• Total leads: ${total}\n• High priority (≥5): ${highPriority}\n• Funding signals: ${funding}\n• Hiring signals: ${hiring}\n\n🏆 *Top Leads:*\n${topLeads.join('\\n')}\n\n📋 <YOUR_GOOGLE_SHEET_URL|View Full Report>`;\n\nreturn [{ json: { message, total, highPriority } }];"
+      },
+      "id": "create-summary",
+      "name": "Create Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 350]
+    },
+    {
+      "parameters": {
+        "channel": "#business-development",
+        "text": "={{ $json.message }}"
+      },
+      "id": "slack-alert",
+      "name": "Slack Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2200, 350],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-credentials",
+          "name": "Slack Credentials"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 8AM Trigger": {
+      "main": [
+        [
+          {
+            "node": "LinkedIn Jobs Scrape",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Funding & Expansion News",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Existing Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkedIn Jobs Scrape": {
+      "main": [
+        [
+          {
+            "node": "Extract & Score Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Funding & Expansion News": {
+      "main": [
+        [
+          {
+            "node": "Extract & Score Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Score Leads": {
+      "main": [
+        [
+          {
+            "node": "Dedupe & Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Existing Leads": {
+      "main": [
+        [
+          {
+            "node": "Dedupe & Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedupe & Filter": {
+      "main": [
+        [
+          {
+            "node": "High Priority Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High Priority Lead?": {
+      "main": [
+        [
+          {
+            "node": "Enrich High Priority",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich High Priority": {
+      "main": [
+        [
+          {
+            "node": "Finalize Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Leads": {
+      "main": [
+        [
+          {
+            "node": "Save to Daily Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Daily Leads": {
+      "main": [
+        [
+          {
+            "node": "Mark as Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark as Processed": {
+      "main": [
+        [
+          {
+            "node": "Create Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Summary": {
+      "main": [
+        [
+          {
+            "node": "Slack Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "smart-lead-radar-simple",
+  "tags": []
+}
